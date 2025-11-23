@@ -1,6 +1,7 @@
 import {
   mat4,
   vec3,
+  vec4,
   quat,
 } from "https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js";
 
@@ -36,6 +37,27 @@ function updateProjection() {
 }
 updateProjection();
 
+// --- UI / interaction state ---
+const tooltipEl = document.getElementById('tooltip');
+let pointerX = 0, pointerY = 0; // client (CSS) pixels
+let hoveredPlanet = null;
+let lockedPlanet = null; // when set, camera will orbit/look at this planet
+const cameraTarget = vec3.fromValues(0,0,0); // smoothed target
+
+canvas.addEventListener('mousemove', (e) => {
+  // keep pointer location for hover detection (CSS pixels)
+  pointerX = e.clientX;
+  pointerY = e.clientY;
+});
+
+canvas.addEventListener('click', (e) => {
+  // on click, toggle lock to the currently hovered object (planet or sun)
+  if (hoveredPlanet) {
+    if (lockedPlanet && lockedPlanet.name === hoveredPlanet.name) lockedPlanet = null;
+    else lockedPlanet = hoveredPlanet;
+  }
+});
+
 // --- shaders (world-space lighting + emissive sun) ---
 const vsSource = `
 attribute vec3 aPosition;
@@ -59,16 +81,32 @@ const fsSource = `
 precision mediump float;
 varying vec3 vNormal;
 varying vec2 vUV;
+varying vec3 vWorldPos;
 uniform vec3 uColor;
 uniform sampler2D uTexture;
 uniform float uUseTexture;
 uniform float uEmissive;
+uniform float uIsSky;
+uniform float uSkyDim;
+uniform float uSkyRepeat;
+uniform float uSunIntensity;
+uniform vec3 uSunPos;
 
 void main(void) {
+  if (uIsSky > 0.5) {
+    vec2 skyUV = vec2(vUV.x * uSkyRepeat, vUV.y);
+    vec4 texColor = texture2D(uTexture, skyUV);
+    gl_FragColor = vec4(texColor.rgb * uSkyDim, texColor.a);
+    return;
+  }
   vec3 N = normalize(vNormal);
-  vec3 lightDir = normalize(vec3(1.0, 0.4, 0.2));
+  // compute light direction from sun position to the fragment in world space
+  vec3 lightDir = normalize(uSunPos - vWorldPos);
   float diffuse = max(dot(N, lightDir), 0.0);
-  float ambient = 0.25;
+  float ambient = 0.18;
+  // optional distance attenuation for a softer, more physical falloff
+  float dist = length(uSunPos - vWorldPos);
+  float attenuation = 1.0 / (1.0 + 0.0015 * dist * dist);
 
   vec3 baseColor = uColor;
 
@@ -78,8 +116,8 @@ void main(void) {
     baseColor = texColor.rgb;
   }
 
-  vec3 color = baseColor * (ambient + diffuse * 0.9);
-  color += uEmissive * vec3(1.2, 1.0, 0.7);
+  vec3 color = baseColor * (ambient + diffuse * uSunIntensity * attenuation);
+  color += uEmissive * vec3(1.2, 1.0, 0.7) * attenuation;
   gl_FragColor = vec4(color, 1.0);
 }
 
@@ -184,6 +222,22 @@ function createRing(innerR, outerR, segments = 64) {
 
 const sphere = createSphere(36, 36, 1.0);
 const skySphere = createSphere(36, 36, 1.0, true);
+// sky buffers (separate from the planet sphere buffers)
+const skyPosBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, skyPosBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, skySphere.positions, gl.STATIC_DRAW);
+
+const skyNormalBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, skyNormalBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, skySphere.normals, gl.STATIC_DRAW);
+
+const skyIndexBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyIndexBuffer);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, skySphere.indices, gl.STATIC_DRAW);
+
+const skyUVBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, skyUVBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, skySphere.uvs, gl.STATIC_DRAW);
 const posBuffer = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
 gl.bufferData(gl.ARRAY_BUFFER, sphere.positions, gl.STATIC_DRAW);
@@ -219,8 +273,7 @@ gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ringIndexBuffer);
 gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ring.indices, gl.STATIC_DRAW);
 
 const saturnRingTex = loadTexture("textures/saturn_ring.png");
-const galaxyTex = loadTexture("textures/galaxy.jpg");
-
+const galaxyTex = loadTexture("textures/space.png");
 // --- Loading Textures for each planet ---
 
 function loadTexture(url) {
@@ -238,13 +291,45 @@ function loadTexture(url) {
     new Uint8Array([255, 255, 255, 255])
   );
 
+  function isPowerOf2(v) {
+    return (v & (v - 1)) === 0;
+  }
+  function nextPowerOf2(v) {
+    v--; v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16; v++;
+    return v;
+  }
+
   const img = new Image();
+  img.crossOrigin = "anonymous";
   img.onload = () => {
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-    gl.generateMipmap(gl.TEXTURE_2D);
+
+    // If image dimensions are already power-of-two we can use REPEAT and mipmaps.
+    if (isPowerOf2(img.width) && isPowerOf2(img.height)) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    } else {
+      // Resize non-power-of-two image to nearest power-of-two so we can repeat it.
+      const cvs = document.createElement('canvas');
+      cvs.width = nextPowerOf2(img.width);
+      cvs.height = nextPowerOf2(img.height);
+      const ctx = cvs.getContext('2d');
+      ctx.drawImage(img, 0, 0, cvs.width, cvs.height);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cvs);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    }
+  };
+  img.onerror = () => {
+    console.warn('Failed to load texture:', url);
   };
   img.src = url;
+
   return texture;
 }
 
@@ -257,6 +342,13 @@ const uSunPos = gl.getUniformLocation(program, "uSunPos");
 const uCameraPos = gl.getUniformLocation(program, "uCameraPos");
 const uColor = gl.getUniformLocation(program, "uColor");
 const uIsSun = gl.getUniformLocation(program, "uIsSun");
+const uIsSky = gl.getUniformLocation(program, "uIsSky");
+const uSkyDim = gl.getUniformLocation(program, "uSkyDim");
+const uSkyRepeat = gl.getUniformLocation(program, "uSkyRepeat");
+const uEmissiveLoc = gl.getUniformLocation(program, "uEmissive");
+const uUseTextureLoc = gl.getUniformLocation(program, "uUseTexture");
+const uTextureLoc = gl.getUniformLocation(program, "uTexture");
+const uSunIntensityLoc = gl.getUniformLocation(program, "uSunIntensity");
 
 // --- GL state ---
 gl.enable(gl.DEPTH_TEST);
@@ -267,7 +359,85 @@ gl.clearColor(0, 0, 0, 1);
 // --- solar data (realistic tints, scaled) ---
 const distanceScale = 6.0; // 1 AU -> 6 units (tweak visually)
 const sizeScale = 0.28; // Earth = ~0.28 units
-const orbitSlowdown = 0.5; // slow orbits by 50%
+let orbitSlowdown = 0.5; // slow orbits by 50% (adjustable via UI)
+
+// wire up orbit speed slider UI (if present)
+const orbitSlider = document.getElementById('orbitSpeedSlider');
+const orbitLabel = document.getElementById('orbitSpeedLabel');
+const orbitPauseBtn = document.getElementById('orbitPauseBtn');
+const orbitResetBtn = document.getElementById('orbitResetBtn');
+const sunEmissiveSlider = document.getElementById('sunEmissiveSlider');
+const sunEmissiveLabel = document.getElementById('sunEmissiveLabel');
+
+// simulation time & pause state
+let simTime = 0.0;
+let lastRealTime = performance.now();
+let paused = false;
+
+// pending value while user drags the slider; applied on change (release)
+let pendingOrbit = orbitSlowdown;
+
+// sun emissive control (brightness coming from origin)
+let sunEmissive = 2.0; // default emissive brightness for the Sun on load
+if (sunEmissiveSlider && sunEmissiveLabel) {
+  const updateSunLabel = (v) => {
+    sunEmissiveLabel.textContent = `Sun: x${v.toFixed(1)}`;
+  };
+  sunEmissiveSlider.value = sunEmissive;
+  updateSunLabel(sunEmissive);
+  sunEmissiveSlider.addEventListener('input', (e) => {
+    sunEmissive = parseFloat(e.target.value);
+    updateSunLabel(sunEmissive);
+  });
+}
+
+if (orbitSlider && orbitLabel) {
+  const updateOrbitLabel = (v, preview = false) => {
+    orbitLabel.textContent = `Speed: x${v.toFixed(2)}`;
+  };
+  orbitSlider.value = orbitSlowdown;
+  pendingOrbit = orbitSlowdown;
+  updateOrbitLabel(orbitSlowdown);
+
+  // while dragging, only update the label/preview
+  orbitSlider.addEventListener('input', (e) => {
+    pendingOrbit = parseFloat(e.target.value);
+    updateOrbitLabel(pendingOrbit, true);
+  });
+
+  // apply the chosen speed when the user releases (change event)
+  orbitSlider.addEventListener('change', (e) => {
+    orbitSlowdown = parseFloat(e.target.value);
+    pendingOrbit = orbitSlowdown;
+    updateOrbitLabel(orbitSlowdown, false);
+  });
+
+  // Pause / Resume
+  if (orbitPauseBtn) {
+    orbitPauseBtn.addEventListener('click', () => {
+      paused = !paused;
+      orbitPauseBtn.textContent = paused ? 'Resume' : 'Pause';
+      // reset lastRealTime so there's no big jump when resuming
+      lastRealTime = performance.now();
+    });
+  }
+
+  // Reset to default
+  if (orbitResetBtn) {
+    orbitResetBtn.addEventListener('click', () => {
+      const def = 0.5;
+      orbitSlider.value = def;
+      orbitSlowdown = def;
+      pendingOrbit = def;
+      updateOrbitLabel(def, false);
+      // reset sun emissive as well
+      const sunDef = 2.0;
+      sunEmissive = sunDef;
+      if (sunEmissiveSlider) sunEmissiveSlider.value = sunDef;
+      if (sunEmissiveLabel) sunEmissiveLabel.textContent = `Sun: x${sunDef.toFixed(1)}`;
+    });
+  }
+}
 
 const planets = [
   {
@@ -430,6 +600,80 @@ for (const p of planets) {
 const sunColor = [1.0, 0.95, 0.7];
 const sunRadius = 1.8;
 
+  // --- asteroid belt (points) ---
+  const ASTEROID_COUNT = 1400;
+  const asteroids = new Array(ASTEROID_COUNT);
+  for (let i = 0; i < ASTEROID_COUNT; i++) {
+    // radius between ~2.2 and 3.5 AU (between Mars and Jupiter)
+    const rAU = 2.2 + Math.random() * 1.6;
+    const radius = rAU * distanceScale;
+    const phase = Math.random() * Math.PI * 2;
+    const speed = (0.6 + Math.random() * 0.8) * (0.5 / (rAU)); // slower further out
+    const incl = (Math.random() - 0.5) * 0.06; // small inclination
+    const sizePx = 0.8 + Math.random() * 1.6; // point size in pixels
+    const gray = 0.4 + Math.random() * 0.4;
+    asteroids[i] = { radius, phase, speed, incl, sizePx, color: [gray, gray, gray] };
+  }
+
+  // create asteroid GL program (simple point sprite)
+  const vsAst = `
+  attribute vec3 aPosition;
+  attribute float aSize;
+  attribute vec3 aColor;
+  uniform mat4 uVP;
+  uniform float uPointScale;
+  varying vec3 vColor;
+  void main() {
+    vColor = aColor;
+    gl_Position = uVP * vec4(aPosition, 1.0);
+    gl_PointSize = aSize * uPointScale;
+  }
+  `;
+
+  const fsAst = `
+  precision mediump float;
+  varying vec3 vColor;
+  void main() {
+    // circular disc inside the point
+    vec2 coord = gl_PointCoord - 0.5;
+    float r = length(coord);
+    if (r > 0.5) discard;
+    float alpha = smoothstep(0.5, 0.45, r);
+    gl_FragColor = vec4(vColor, alpha);
+  }
+  `;
+
+  const vshAst = createShader(gl.VERTEX_SHADER, vsAst);
+  const fshAst = createShader(gl.FRAGMENT_SHADER, fsAst);
+  const astProgram = gl.createProgram();
+  gl.attachShader(astProgram, vshAst);
+  gl.attachShader(astProgram, fshAst);
+  gl.linkProgram(astProgram);
+  let astLinked = true;
+  if (!gl.getProgramParameter(astProgram, gl.LINK_STATUS)) {
+    console.error('Asteroid program link error:', gl.getProgramInfoLog(astProgram));
+    astLinked = false;
+  }
+
+  let aPosAst = -1, aSizeAst = -1, aColorAst = -1, uVPAst = null, uPointScale = null;
+  const astPosBuffer = gl.createBuffer();
+  const astSizeBuffer = gl.createBuffer();
+  const astColorBuffer = gl.createBuffer();
+  // typed arrays reused each frame
+  const astPosArray = new Float32Array(ASTEROID_COUNT * 3);
+  const astSizeArray = new Float32Array(ASTEROID_COUNT);
+  const astColorArray = new Float32Array(ASTEROID_COUNT * 3);
+  if (astLinked) {
+    aPosAst = gl.getAttribLocation(astProgram, 'aPosition');
+    aSizeAst = gl.getAttribLocation(astProgram, 'aSize');
+    aColorAst = gl.getAttribLocation(astProgram, 'aColor');
+    uVPAst = gl.getUniformLocation(astProgram, 'uVP');
+    uPointScale = gl.getUniformLocation(astProgram, 'uPointScale');
+  } else {
+    // if asteroid program failed, skip asteroid rendering
+    console.warn('Asteroid rendering disabled due to shader/link error');
+  }
+
 // --- camera (quaternion + momentum + smooth zoom) ---
 let yaw = 0,
   pitch = 0;
@@ -485,12 +729,15 @@ function setModel(m) {
   gl.uniformMatrix4fv(uModel, false, m);
 }
 function drawMesh(model, color, isSun = 0, texture = null) {
-  gl.uniform1f(gl.getUniformLocation(program, "uEmissive"), isSun);
+  // use the configurable sun emissive when drawing the sun, otherwise use provided value (or 0)
+  let emissiveVal = 0.0;
+  if (isSun > 0) emissiveVal = sunEmissive;
+  else emissiveVal = isSun || 0.0;
+  gl.uniform1f(uEmissiveLoc, emissiveVal);
+  // ensure sky-mode is off for regular meshes
+  gl.uniform1f(uIsSky, 0.0);
   gl.uniform3fv(gl.getUniformLocation(program, "uColor"), color);
-  gl.uniform1f(
-    gl.getUniformLocation(program, "uUseTexture"),
-    texture ? 1.0 : 0.0
-  );
+  gl.uniform1f(gl.getUniformLocation(program, "uUseTexture"), texture ? 1.0 : 0.0);
 
   if (texture) {
     gl.activeTexture(gl.TEXTURE0);
@@ -513,8 +760,118 @@ function drawMesh(model, color, isSun = 0, texture = null) {
   gl.drawElements(gl.TRIANGLES, sphere.indices.length, gl.UNSIGNED_SHORT, 0);
 }
 
+function drawSky(model, texture) {
+  // Draw sky first without writing depth so everything else renders on top
+  gl.depthMask(false);
+  gl.uniform1f(uIsSky, 1.0);
+  gl.uniform1f(uEmissiveLoc, 0.0);
+  gl.uniform3fv(gl.getUniformLocation(program, "uColor"), [1, 1, 1]);
+  gl.uniform1f(gl.getUniformLocation(program, "uUseTexture"), 1.0);
+
+  // set sky dim and repeat
+  gl.uniform1f(uSkyDim, 0.7);
+  gl.uniform1f(uSkyRepeat, 2.0);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.uniform1i(gl.getUniformLocation(program, "uTexture"), 0);
+
+  setModel(model);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, skyPosBuffer);
+  gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(aPosition);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, skyNormalBuffer);
+  gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(aNormal);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, skyUVBuffer);
+  gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(aUV);
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, skyIndexBuffer);
+  gl.drawElements(gl.TRIANGLES, skySphere.indices.length, gl.UNSIGNED_SHORT, 0);
+
+  gl.depthMask(true);
+  gl.uniform1f(uIsSky, 0.0);
+}
+
+// draw a simple white outline by rendering the backfaces of a slightly scaled model
+function drawOutline(model, thickness = 1.03) {
+  // scale model outwards
+  const om = mat4.clone(model);
+  mat4.scale(om, om, [thickness, thickness, thickness]);
+  // render only backfaces of the scaled model so the silhouette appears
+  // but don't overwrite the depth buffer so the original sphere remains visible
+  const prevDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
+  gl.depthMask(false);
+  // use LEQUAL so backfaces that are at the same depth as the original pass
+  const prevDepthFunc = gl.getParameter(gl.DEPTH_FUNC);
+  gl.depthFunc(gl.LEQUAL);
+
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.FRONT);
+
+  gl.uniform1f(uIsSky, 0.0);
+  gl.uniform1f(uUseTextureLoc, 0.0);
+  gl.uniform3fv(uColor, [1.0, 1.0, 1.0]);
+  gl.uniform1f(uEmissiveLoc, 2.0);
+
+  setModel(om);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(aPosition);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+  gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(aNormal);
+
+  // UVs not needed but keep attribute enabled state consistent
+  gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
+  gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(aUV);
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+  gl.drawElements(gl.TRIANGLES, sphere.indices.length, gl.UNSIGNED_SHORT, 0);
+
+  // restore state
+  gl.disable(gl.CULL_FACE);
+  gl.depthFunc(prevDepthFunc);
+  gl.depthMask(prevDepthMask);
+}
+
+// helper: project a world-space point to canvas pixel coordinates (device pixels)
+function worldToCanvasPoint(worldPos, vpMat) {
+  const v = vec4.fromValues(worldPos[0], worldPos[1], worldPos[2], 1.0);
+  vec4.transformMat4(v, v, vpMat);
+  if (Math.abs(v[3]) < 1e-6) return null;
+  v[0] /= v[3];
+  v[1] /= v[3];
+  // NDC -> canvas (device) pixels
+  const x = (v[0] * 0.5 + 0.5) * canvas.width;
+  const y = (-v[1] * 0.5 + 0.5) * canvas.height;
+  return [x, y, v[2]];
+}
+
+function showTooltip(text, canvasX, canvasY) {
+  if (!tooltipEl) return;
+  tooltipEl.style.display = 'block';
+  // convert canvas device pixels back to CSS pixels for positioning
+  const dpr = window.devicePixelRatio || 1;
+  tooltipEl.style.left = `${Math.round(canvasX / dpr + 8)}px`;
+  tooltipEl.style.top = `${Math.round(canvasY / dpr + 8)}px`;
+  tooltipEl.textContent = text;
+}
+
+function hideTooltip() {
+  if (!tooltipEl) return;
+  tooltipEl.style.display = 'none';
+}
+
 function drawRing(model, texture) {
-  gl.uniform1f(gl.getUniformLocation(program, "uEmissive"), 0.0);
+  gl.uniform1f(uEmissiveLoc, 0.7);
   gl.uniform3fv(gl.getUniformLocation(program, "uColor"), [1, 1, 1]);
   gl.uniform1f(gl.getUniformLocation(program, "uUseTexture"), 1.0);
 
@@ -574,14 +931,19 @@ function render() {
 
   const forward = vec3.create();
   vec3.transformQuat(forward, [0, 0, 1], qTotal);
+  // position the camera relative to the current camera target so
+  // zoom and orbit happen around the selected target (not always the origin)
   const eye = vec3.create();
-  vec3.scale(eye, forward, -radiusCam);
+  const eyeOffset = vec3.create();
+  vec3.scale(eyeOffset, forward, -radiusCam);
+  vec3.add(eye, cameraTarget, eyeOffset);
   const up = vec3.create();
   vec3.transformQuat(up, [0, 1, 0], qTotal);
 
   // VP
   const view = mat4.create();
-  mat4.lookAt(view, eye, [0, 0, 0], up);
+  // use smoothed camera target; if locked to a planet we'll update desiredTarget below
+  mat4.lookAt(view, eye, cameraTarget, up);
   const vp = mat4.create();
   mat4.multiply(vp, projection, view);
   gl.uniformMatrix4fv(uVP, false, vp);
@@ -589,20 +951,57 @@ function render() {
   // uniforms: camera & sun
   gl.uniform3fv(uCameraPos, eye);
   gl.uniform3fv(uSunPos, [0, 0, 0]);
+  // set sunlight intensity for diffuse lighting
+  if (uSunIntensityLoc) gl.uniform1f(uSunIntensityLoc, sunEmissive);
 
   // clear and draw
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-  const t = performance.now() * 0.001;
-  const timeScale = orbitSlowdown; // apply slowdown requested (50%)
+  // update simulation time (respecting pause)
+  const nowReal = performance.now();
+  if (!paused) {
+    simTime += (nowReal - lastRealTime) * 0.001; // seconds
+  }
+  lastRealTime = nowReal;
+  const t = simTime;
+  const timeScale = orbitSlowdown; // apply slowdown requested
 
   // Draw sky sphere (huge inverted sphere)
+  const mSky = mat4.create();
+  // scale to be large relative to camera distance
+  const skyScale = Math.max(600, radiusCam * 1.6);
+  mat4.scale(mSky, mSky, [skyScale, skyScale, skyScale]);
+  drawSky(mSky, galaxyTex);
 
   // Sun (emissive)
   const mSun = mat4.create();
   mat4.scale(mSun, mSun, [sunRadius, sunRadius, sunRadius]);
-  drawMesh(mSun, sunColor, 1);
+  drawMesh(mSun, sunColor, 10.0);
+
+  // prepare for hover detection: track nearest planet under cursor
+  hoveredPlanet = null;
+  const dpr = window.devicePixelRatio || 1;
+  const pointerCanvasX = pointerX * dpr;
+  const pointerCanvasY = pointerY * dpr;
+  let bestDistSq = Infinity;
+
+  // check sun hover first so the sun is clickable like planets
+  const sunWorld = [0, 0, 0];
+  const sunScr = worldToCanvasPoint(sunWorld, vp);
+  if (sunScr) {
+    const sunOff = [sunRadius, 0, 0];
+    const sunScr2 = worldToCanvasPoint(sunOff, vp);
+    let sunRadiusPx = 12;
+    if (sunScr2) sunRadiusPx = Math.max(6, Math.hypot(sunScr2[0] - sunScr[0], sunScr2[1] - sunScr[1]));
+    const dxs = sunScr[0] - pointerCanvasX;
+    const dys = sunScr[1] - pointerCanvasY;
+    const distSs = dxs * dxs + dys * dys;
+    if (distSs < sunRadiusPx * sunRadiusPx) {
+      bestDistSq = distSs;
+      hoveredPlanet = { name: 'Sun', isSun: true, _screen: sunScr, worldPos: sunWorld };
+    }
+  }
 
   // planets & moons
   for (const p of planets) {
@@ -618,6 +1017,29 @@ function render() {
     mat4.translate(pm, pm, [px, 0, pz]);
     mat4.scale(pm, pm, [p.visualSize, p.visualSize, p.visualSize]);
     drawMesh(pm, p.color, 0, p.texture);
+
+    // compute planet screen position and approximate radius in pixels
+    const worldPos = [px, 0, pz];
+    const scr = worldToCanvasPoint(worldPos, vp);
+    if (scr) {
+      // approximate radius: project a small offset and measure
+      const offset = [px + p.visualSize, 0, pz];
+      const scr2 = worldToCanvasPoint(offset, vp);
+      let radiusPx = 12; // fallback
+      if (scr2) {
+        const dx = scr2[0] - scr[0];
+        const dy = scr2[1] - scr[1];
+        radiusPx = Math.max(6, Math.hypot(dx, dy));
+      }
+      const dxp = scr[0] - pointerCanvasX;
+      const dyp = scr[1] - pointerCanvasY;
+      const distSq = dxp * dxp + dyp * dyp;
+      if (distSq < radiusPx * radiusPx && distSq < bestDistSq) {
+        bestDistSq = distSq;
+        hoveredPlanet = p;
+        hoveredPlanet._screen = scr;
+      }
+    }
 
     // simple ring for Saturn (flat scaled sphere)
     if (p.hasRing) {
@@ -644,6 +1066,106 @@ function render() {
         drawMesh(mm, m.color, 0, m.texture);
       }
     }
+  }
+
+  // update asteroid positions into buffers and draw them
+  if (astLinked) {
+    for (let i = 0; i < ASTEROID_COUNT; i++) {
+    const a = asteroids[i];
+    const ang = a.phase + t * a.speed;
+    const x = Math.cos(ang) * a.radius;
+    const z = Math.sin(ang) * a.radius;
+    const y = Math.sin(ang * 3.14) * a.radius * a.incl; // small vertical oscillation by inclination
+    astPosArray[i * 3 + 0] = x;
+    astPosArray[i * 3 + 1] = y;
+    astPosArray[i * 3 + 2] = z;
+    astSizeArray[i] = a.sizePx;
+    astColorArray[i * 3 + 0] = a.color[0];
+    astColorArray[i * 3 + 1] = a.color[1];
+    astColorArray[i * 3 + 2] = a.color[2];
+    }
+
+    // upload buffers
+    gl.useProgram(astProgram);
+    gl.bindBuffer(gl.ARRAY_BUFFER, astPosBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, astPosArray, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aPosAst);
+    gl.vertexAttribPointer(aPosAst, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, astSizeBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, astSizeArray, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aSizeAst);
+    gl.vertexAttribPointer(aSizeAst, 1, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, astColorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, astColorArray, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(aColorAst);
+    gl.vertexAttribPointer(aColorAst, 3, gl.FLOAT, false, 0, 0);
+
+    gl.uniformMatrix4fv(uVPAst, false, vp);
+    // scale point size with DPI and a small camera-distance compensation
+    const pointScale = 1.0 * dpr * Math.max(0.6, 120.0 / radiusCam);
+    gl.uniform1f(uPointScale, pointScale);
+
+    // blending for soft points
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.drawArrays(gl.POINTS, 0, ASTEROID_COUNT);
+
+    // restore main program
+    gl.useProgram(program);
+  }
+
+  // Update cameraTarget: if locked to a planet, aim at its current world position; smooth the target
+  const desiredTarget = vec3.fromValues(0,0,0);
+  // draw outline for the hovered object (sun or planet) after hover detection
+  if (hoveredPlanet) {
+    if (hoveredPlanet.isSun) {
+      drawOutline(mat4.clone(mSun), 1.03);
+    } else {
+      // find planet object and compute its current model matrix
+      const p = planets.find((pl) => pl.name === hoveredPlanet.name) || hoveredPlanet;
+      const orbitalSpeed = (10.0 * Math.PI) / (p.period || 365);
+      const angle =
+        (t * orbitalSpeed * timeScale * 5.0) /
+        Math.sqrt(Math.max(0.0001, p.distAU));
+      const px = Math.cos(angle) * p.distance;
+      const pz = Math.sin(angle) * p.distance;
+      const pm = mat4.create();
+      mat4.translate(pm, pm, [px, 0, pz]);
+      mat4.scale(pm, pm, [p.visualSize, p.visualSize, p.visualSize]);
+      drawOutline(pm, 1.03);
+    }
+  }
+  if (lockedPlanet) {
+    // if the sun is locked, target origin
+    if (lockedPlanet.isSun) {
+      desiredTarget[0] = 0;
+      desiredTarget[1] = 0;
+      desiredTarget[2] = 0;
+    } else {
+      // lockedPlanet may be a planet object or a transient object with the planet's name
+      let p = lockedPlanet;
+      if (!p.distAU) p = planets.find((pl) => pl.name === lockedPlanet.name) || lockedPlanet;
+      const orbitalSpeed = (10.0 * Math.PI) / (p.period || 365);
+      const angle =
+        (t * orbitalSpeed * timeScale * 5.0) /
+        Math.sqrt(Math.max(0.0001, p.distAU));
+      const px = Math.cos(angle) * p.distance;
+      const pz = Math.sin(angle) * p.distance;
+      desiredTarget[0] = px;
+      desiredTarget[1] = 0;
+      desiredTarget[2] = pz;
+    }
+  }
+  // smooth blend
+  vec3.lerp(cameraTarget, cameraTarget, desiredTarget, 0.12);
+
+  // show/hide tooltip based on hover
+  if (hoveredPlanet) {
+    showTooltip(hoveredPlanet.name, hoveredPlanet._screen[0], hoveredPlanet._screen[1]);
+  } else {
+    hideTooltip();
   }
 
   requestAnimationFrame(render);
