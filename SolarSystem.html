@@ -28,15 +28,43 @@
 </head>
 <body>
   <canvas id="glCanvas"></canvas>
+  <div id="loadingOverlay" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;z-index:2000;color:#fff;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;">
+    <div style="text-align:center;">
+      <div style="font-size:22px;font-weight:700;">Solaria</div>
+      <div style="margin-top:8px;font-size:14px;opacity:0.85">A space simulation by Keaton White</div>
+    </div>
+  </div>
   <div id="tooltip" style="position:fixed;pointer-events:none;left:0;top:0;padding:6px 8px;background:rgba(0,0,0,0.7);color:#fff;border-radius:4px;font-family:sans-serif;font-size:13px;display:none;z-index:1000"></div>
   <div id="orbitControls">
     <button id="orbitPauseBtn" style="padding:6px 10px;border-radius:6px;border:none;background:rgba(255,255,255,0.06);color:#fff;cursor:pointer">Pause</button>
     <div id="orbitSpeedLabel">Speed: x0.50</div>
     <input id="orbitSpeedSlider" type="range" min="0" max="100" step="0.1" value="0.5" />
-    <div id="sunEmissiveLabel" style="color:#fff;font-family:sans-serif;font-size:13px;min-width:92px;text-align:center">Sun: x10.0</div>
-    <input id="sunEmissiveSlider" type="range" min="0" max="50" step="0.1" value="10" />
+    <div id="sunEmissiveLabel" style="color:#fff;font-family:sans-serif;font-size:13px;min-width:92px;text-align:center">Sun: x2.0</div>
+    <input id="sunEmissiveSlider" type="range" min="0" max="10" step="0.1" value="2" />
     <button id="orbitResetBtn" style="padding:6px 10px;border-radius:6px;border:none;background:rgba(255,255,255,0.06);color:#fff;cursor:pointer">Reset</button>
   </div>
-  <script type="module" src="script.js"></script>
+  <!-- preload module in background, then import after 2s so splash shows while resources fetch -->
+  <link rel="modulepreload" href="script.js">
+  <script>
+    (function(){
+      const overlay = document.getElementById('loadingOverlay');
+      const minDelay = 2000; // 2 seconds
+
+      // Start importing immediately so the app initializes while the overlay is visible
+      const importPromise = import('./script.js');
+
+      // Wait for both the import to finish and the minimum delay
+      const delayPromise = new Promise((resolve) => setTimeout(resolve, minDelay));
+
+      Promise.all([importPromise, delayPromise]).then(() => {
+        overlay.style.transition = 'opacity 400ms ease';
+        overlay.style.opacity = '0';
+        setTimeout(() => overlay.remove(), 450);
+      }).catch((err) => {
+        console.error('Failed to load app module:', err);
+        overlay.textContent = 'Failed to load application';
+      });
+    })();
+  </script>
 </body>
 </html>

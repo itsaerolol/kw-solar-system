@@ -381,7 +381,7 @@ let pendingOrbit = orbitSlowdown;
 let sunEmissive = 2.0; // default emissive brightness for the Sun on load
 if (sunEmissiveSlider && sunEmissiveLabel) {
   const updateSunLabel = (v) => {
-    sunEmissiveLabel.textContent = `Sun: x${v.toFixed(1)}`;
+    sunEmissiveLabel.textContent = `Sun Brightness: x${v.toFixed(1)}`;
   };
   sunEmissiveSlider.value = sunEmissive;
   updateSunLabel(sunEmissive);
@@ -393,7 +393,7 @@ if (sunEmissiveSlider && sunEmissiveLabel) {
 
 if (orbitSlider && orbitLabel) {
   const updateOrbitLabel = (v, preview = false) => {
-    orbitLabel.textContent = `Speed: x${v.toFixed(2)}`;
+    orbitLabel.textContent = `Time Dilation: x${v.toFixed(2)}`;
   };
   orbitSlider.value = orbitSlowdown;
   pendingOrbit = orbitSlowdown;
