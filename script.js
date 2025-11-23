@@ -434,7 +434,7 @@ if (orbitSlider && orbitLabel) {
       const sunDef = 2.0;
       sunEmissive = sunDef;
       if (sunEmissiveSlider) sunEmissiveSlider.value = sunDef;
-      if (sunEmissiveLabel) sunEmissiveLabel.textContent = `Sun: x${sunDef.toFixed(1)}`;
+      if (sunEmissiveLabel) sunEmissiveLabel.textContent = `Sun Brightness: x${sunDef.toFixed(1)}`;
     });
   }
 }
