@@ -437,6 +437,15 @@ if (orbitSlider && orbitLabel) {
       if (sunEmissiveLabel) sunEmissiveLabel.textContent = `Sun Brightness: x${sunDef.toFixed(1)}`;
     });
   }
+
+  // Grid toggle button (if present in HTML)
+  const gridToggleBtn = document.getElementById('gridToggleBtn');
+  if (gridToggleBtn) {
+    gridToggleBtn.addEventListener('click', () => {
+      gridVisible = !gridVisible;
+      gridToggleBtn.textContent = gridVisible ? 'Grid: On' : 'Grid: Off';
+    });
+  }
 }
 
 const planets = [
@@ -674,6 +683,106 @@ const sunRadius = 1.8;
     console.warn('Asteroid rendering disabled due to shader/link error');
   }
 
+// --- grid (horizontal XZ plane) ---
+// simple unlit line shader to draw a grid on the XZ plane at y=0
+const vsGridSrc = `
+attribute vec3 aPosition;
+uniform mat4 uVP;
+uniform mat4 uModel;
+varying vec3 vWorldPos;
+void main() {
+  vec4 wp = uModel * vec4(aPosition, 1.0);
+  vWorldPos = wp.xyz;
+  gl_Position = uVP * wp;
+}
+`;
+const fsGridSrc = `
+precision mediump float;
+varying vec3 vWorldPos;
+uniform vec3 uColor;
+uniform float uAlpha;
+uniform float uFadeStart; // distance where fade begins
+uniform float uFadeEnd;   // distance where fade reaches 0
+void main() {
+  float r = length(vWorldPos.xz);
+  float fade = 1.0;
+  if (r > uFadeStart) {
+    fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, r);
+  }
+  float outA = uAlpha * fade;
+  if (outA <= 0.001) discard;
+  gl_FragColor = vec4(uColor, outA);
+}
+`;
+const vshGrid = createShader(gl.VERTEX_SHADER, vsGridSrc);
+const fshGrid = createShader(gl.FRAGMENT_SHADER, fsGridSrc);
+const gridProgram = gl.createProgram();
+gl.attachShader(gridProgram, vshGrid);
+gl.attachShader(gridProgram, fshGrid);
+gl.linkProgram(gridProgram);
+if (!gl.getProgramParameter(gridProgram, gl.LINK_STATUS)) {
+  console.error('Grid program link error:', gl.getProgramInfoLog(gridProgram));
+}
+
+// grid buffer (positions only)
+const gridBuffer = gl.createBuffer();
+let gridVertexCount = 0;
+const gridModel = mat4.create(); // identity by default
+let gridVisible = true; // toggleable by UI
+// fade parameters (will be set relative to grid size)
+let gridFadeStart = 200.0;
+let gridFadeEnd = 400.0;
+
+// utility: build grid vertices for XZ plane centered at origin
+function buildGrid(size = 600, divisions = 40) {
+  const half = size * 0.5;
+  const step = size / divisions;
+  const verts = [];
+  // lines parallel to X (varying Z)
+  for (let i = 0; i <= divisions; i++) {
+    const z = -half + i * step;
+    verts.push(-half, 0, z, half, 0, z);
+  }
+  // lines parallel to Z (varying X)
+  for (let i = 0; i <= divisions; i++) {
+    const x = -half + i * step;
+    verts.push(x, 0, -half, x, 0, half);
+  }
+  const arr = new Float32Array(verts);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gridBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW);
+  gridVertexCount = arr.length / 3;
+}
+let gridSize = 800;
+let gridDivisions = 64;
+buildGrid(gridSize, gridDivisions);
+
+// keep fade parameters in sync with grid size by default
+gridFadeStart = gridSize * 0.25;
+gridFadeEnd = gridSize * 0.5;
+
+// API: update/rebuild the grid at runtime. Call from console or hook a UI.
+function updateGrid(size, divisions) {
+  gridSize = typeof size === 'number' ? size : gridSize;
+  gridDivisions = typeof divisions === 'number' ? divisions : gridDivisions;
+  buildGrid(gridSize, gridDivisions);
+  // adjust fades if caller didn't supply explicit ones
+  gridFadeStart = gridSize * 0.25;
+  gridFadeEnd = gridSize * 0.5;
+}
+
+// convenience alias exposed for quick console tweaks: `setGrid(size, divisions)`
+window.setGrid = (size, divisions) => updateGrid(size, divisions);
+
+// convenience: set grid fade radii (in world units)
+window.setGridFade = (start, end) => {
+  if (typeof start === 'number') gridFadeStart = start;
+  if (typeof end === 'number') gridFadeEnd = end;
+};
+
+// build an initial grid sized reasonably relative to typical camera
+// (grid already initialized above with `gridSize` / `gridDivisions`)
+
 // --- camera (quaternion + momentum + smooth zoom) ---
 let yaw = 0,
   pitch = 0;
@@ -769,7 +878,7 @@ function drawSky(model, texture) {
   gl.uniform1f(gl.getUniformLocation(program, "uUseTexture"), 1.0);
 
   // set sky dim and repeat
-  gl.uniform1f(uSkyDim, 0.7);
+  gl.uniform1f(uSkyDim, 0.57);
   gl.uniform1f(uSkyRepeat, 2.0);
 
   gl.activeTexture(gl.TEXTURE0);
@@ -896,6 +1005,41 @@ function drawRing(model, texture) {
   gl.drawElements(gl.TRIANGLES, ring.indices.length, gl.UNSIGNED_SHORT, 0);
 }
 
+// draw the horizontal grid on the XZ plane
+function drawGrid(vpMat) {
+  if (!gridVisible) return;
+
+  // choose color and alpha that stay subtle
+  const gridColor = [0.6, 0.6, 0.6];
+  const gridAlpha = 0.16;
+
+  gl.useProgram(gridProgram);
+  const aPosGrid = gl.getAttribLocation(gridProgram, 'aPosition');
+  const uVPGrid = gl.getUniformLocation(gridProgram, 'uVP');
+  const uModelGrid = gl.getUniformLocation(gridProgram, 'uModel');
+  const uColorGrid = gl.getUniformLocation(gridProgram, 'uColor');
+  const uAlphaGrid = gl.getUniformLocation(gridProgram, 'uAlpha');
+  const uFadeStartLoc = gl.getUniformLocation(gridProgram, 'uFadeStart');
+  const uFadeEndLoc = gl.getUniformLocation(gridProgram, 'uFadeEnd');
+
+  gl.uniformMatrix4fv(uVPGrid, false, vpMat);
+  gl.uniformMatrix4fv(uModelGrid, false, gridModel);
+  gl.uniform3fv(uColorGrid, gridColor);
+  gl.uniform1f(uAlphaGrid, gridAlpha);
+  gl.uniform1f(uFadeStartLoc, gridFadeStart);
+  gl.uniform1f(uFadeEndLoc, gridFadeEnd);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, gridBuffer);
+  gl.enableVertexAttribArray(aPosGrid);
+  gl.vertexAttribPointer(aPosGrid, 3, gl.FLOAT, false, 0, 0);
+
+  // lines should respect depth so planets occlude grid where appropriate
+  gl.drawArrays(gl.LINES, 0, gridVertexCount);
+
+  // restore main program
+  gl.useProgram(program);
+}
+
 // --- render loop ---
 function render() {
   resizeCanvasToDisplaySize();
@@ -973,6 +1117,9 @@ function render() {
   const skyScale = Math.max(600, radiusCam * 1.6);
   mat4.scale(mSky, mSky, [skyScale, skyScale, skyScale]);
   drawSky(mSky, galaxyTex);
+
+  // draw ground/grid on XZ plane under the scene
+  drawGrid(vp);
 
   // Sun (emissive)
   const mSun = mat4.create();
